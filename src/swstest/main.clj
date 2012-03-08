@@ -3,7 +3,7 @@
   (:import [com.amazonaws.auth AWSCredentials PropertiesCredentials]
            [com.amazonaws.services.simpleworkflow AmazonSimpleWorkflowClient]
            [com.amazonaws AmazonServiceException ClientConfiguration Protocol]
-           [com.amazonaws.services.simpleworkflow.model PollForActivityTaskRequest PollForDecisionTaskRequest TaskList RespondDecisionTaskCompletedRequest Decision DecisionType ScheduleActivityTaskDecisionAttributes ActivityType])
+           [com.amazonaws.services.simpleworkflow.model PollForActivityTaskRequest PollForDecisionTaskRequest TaskList RespondDecisionTaskCompletedRequest Decision DecisionType ScheduleActivityTaskDecisionAttributes ActivityType CompleteWorkflowExecutionDecisionAttributes])
   (:gen-class))
 
 (defn get-client [region]
@@ -27,35 +27,55 @@
   (let [req (doto (PollForDecisionTaskRequest.) (.withDomain domain) (.withIdentity identity) (.withTaskList (doto (TaskList.) (.withName tasklist))) (.withReverseOrder (Boolean. "true")))]
     (. client (pollForDecisionTask req))))
 
-(defn worker [id]
+(defn worker [id tasklist]
   (while true
-    (let [task (poll-for-activity "Messaging" id "mainTaskList")]
+    (let [task (poll-for-activity "Messaging" id tasklist)]
       (cond
        (= "sendmail" (.getActivityType task)) (sendmail client task)
        (= "sendsms" (.getActivityType task)) (sendsms client task)))))
 
-(defn decider [id]
+(defn schedule-task [input token activity-type activity-id tasklist]
+  (let [dec (doto (Decision.) (.withDecisionType DecisionType/ScheduleActivityTask)
+                  (.withScheduleActivityTaskDecisionAttributes
+                   (doto (ScheduleActivityTaskDecisionAttributes.)
+                     (.withActivityType (doto (ActivityType.) (.withName activity-type) (.withVersion "1.0")))
+                     (.withActivityId activity-id)
+                     (.withInput input)
+                     (.withTaskList (doto (TaskList.) (.withName tasklist))))))
+        req (doto (RespondDecisionTaskCompletedRequest.) (.withTaskToken token) (.withDecisions (list dec)))] 
+    (. client (respondDecisionTaskCompleted req))))
+
+(defn complete-workflow [token]
+  (let [dec (doto (Decision.) (.withDecisionType DecisionType/CompleteWorkflowExecution)
+                  (.withCompleteWorkflowExecutionDecisionAttributes
+                   (doto (CompleteWorkflowExecutionDecisionAttributes.)
+                     (.withResult "OK"))))
+        req (doto (RespondDecisionTaskCompletedRequest.) (.withTaskToken token) (.withDecisions (list dec)))] 
+    (. client (respondDecisionTaskCompleted req))))
+
+(defn- get-input [event]
+  (let [attr (.getWorkflowExecutionStartedEventAttributes event)]
+    (. attr getInput)))
+
+(defn decider [id tasklist]
   (while true
-    (let [decision (poll-for-decision "Messaging" id "mainTaskList")
-          events (.getEvents decision)
+    (let [decision (poll-for-decision "Messaging" id tasklist)
+          type (.getWorkflowType decision)
+          task-token (.getTaskToken decision)
+          events (vec (.getEvents decision))
           last-event (first events)]
       (prn "EVENTS " events)
       (cond
        (= (.getEventType last-event) "WorkflowExecutionStarted") (prn "Started")
        (= (.getEventType last-event) "DecisionTaskScheduled") (prn "Scheduled")
-       (= (.getEventType last-event) "DecisionTaskStarted") (prn "Task started")
-       (= (.getEventType last-event) "WorkflowExecutionTimedOut") (prn "Timeout"))
-      (let [dec (doto (Decision.) (.withDecisionType DecisionType/ScheduleActivityTask)
-                      (.withScheduleActivityTaskDecisionAttributes
-                       (doto (ScheduleActivityTaskDecisionAttributes.)
-                         (.withActivityType (doto (ActivityType.) (.withName "sendmail") (.withVersion "1.0")))
-                         (.withActivityId "test-1")
-                         (.withInput "bar")
-                         (.withTaskList (doto (TaskList.) (.withName "mainTaskList"))))))
-            req (doto (RespondDecisionTaskCompletedRequest.) (.withTaskToken (.getTaskToken decision)) (.withDecisions (list dec)))] 
-        (. client (respondDecisionTaskCompleted req))))))
+       (= (.getEventType last-event) "DecisionTaskStarted") (schedule-task (get-input (last events)) task-token "sendmail" "test-1" tasklist)
+       (= (.getEventType last-event) "ActivityTaskFailed") (schedule-task (get-input (last events)) task-token "sendsms" "test-2" tasklist)
+       (= (.getEventType last-event) "ActivityTaskCompleted") (complete-workflow task-token)
+       (= (.getEventType last-event) "WorkflowExecutionTimedOut") (prn "WF Timeout")
+       (= (.getEventType last-event) "DecisionTaskTimedOut") (prn "Task Timeout")
+       (= (.getEventType last-event) "ScheduleActivityTaskFailed") (prn "Sched task failed")))))
 
-(defn -main [type id]
+(defn -main [type id tasklist]
   (cond
-   (= type "W") (worker id)
-   (= type "D") (decider id)))
+   (= type "W") (worker id tasklist)
+   (= type "D") (decider id tasklist)))
