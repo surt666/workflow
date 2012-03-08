@@ -29,10 +29,12 @@
 
 (defn worker [id tasklist]
   (while true
-    (let [task (poll-for-activity "Messaging" id tasklist)]
+    (let [task (poll-for-activity "Messaging" id tasklist)
+          type (.getActivityType task)]
+      (prn "TASK" (.getName type))
       (cond
-       (= "sendmail" (.getActivityType task)) (sendmail client task)
-       (= "sendsms" (.getActivityType task)) (sendsms client task)))))
+       (= "sendmail" (.getName type)) (sendmail client task)
+       (= "sendsms" (.getName type)) (sendsms client task)))))
 
 (defn schedule-task [input token activity-type activity-id tasklist]
   (let [dec (doto (Decision.) (.withDecisionType DecisionType/ScheduleActivityTask)
