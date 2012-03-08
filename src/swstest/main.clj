@@ -30,8 +30,8 @@
 (defn worker [id tasklist]
   (while true
     (let [task (poll-for-activity "Messaging" id tasklist)
-          type (.getActivityType task)]
-      (prn "TASK" (.getName type))
+          _ (prn "TASK " task)
+          type (.getActivityType task)]      
       (cond
        (= "sendmail" (.getName type)) (sendmail client task)
        (= "sendsms" (.getName type)) (sendsms client task)))))
@@ -43,7 +43,10 @@
                      (.withActivityType (doto (ActivityType.) (.withName activity-type) (.withVersion "1.0")))
                      (.withActivityId activity-id)
                      (.withInput input)
+                     (.withScheduleToCloseTimeout "30")
+                     (.withHeartbeatTimeout "60")
                      (.withTaskList (doto (TaskList.) (.withName tasklist))))))
+        _ (prn "DEC " dec)
         req (doto (RespondDecisionTaskCompletedRequest.) (.withTaskToken token) (.withDecisions (list dec)))] 
     (. client (respondDecisionTaskCompleted req))))
 
@@ -68,11 +71,9 @@
           last-event (first events)]
       (prn "EVENTS " events)
       (cond
-       (= (.getEventType last-event) "WorkflowExecutionStarted") (prn "Started")
-       (= (.getEventType last-event) "DecisionTaskScheduled") (prn "Scheduled")
+       (= (.getEventType (events 2)) "ActivityTaskCompleted") (complete-workflow task-token)
+       (= (.getEventType (events 2)) "ActivityTaskFailed") (schedule-task (get-input (last events)) task-token "sendsms" "test-2" tasklist)
        (= (.getEventType last-event) "DecisionTaskStarted") (schedule-task (get-input (last events)) task-token "sendmail" "test-1" tasklist)
-       (= (.getEventType last-event) "ActivityTaskFailed") (schedule-task (get-input (last events)) task-token "sendsms" "test-2" tasklist)
-       (= (.getEventType last-event) "ActivityTaskCompleted") (complete-workflow task-token)
        (= (.getEventType last-event) "WorkflowExecutionTimedOut") (prn "WF Timeout")
        (= (.getEventType last-event) "DecisionTaskTimedOut") (prn "Task Timeout")
        (= (.getEventType last-event) "ScheduleActivityTaskFailed") (prn "Sched task failed")))))
